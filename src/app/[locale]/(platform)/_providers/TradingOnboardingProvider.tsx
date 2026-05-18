@@ -50,6 +50,7 @@ import {
   TRADING_AUTH_TYPES,
 } from '@/lib/trading-auth/client'
 import { isTradingAuthRequiredError } from '@/lib/trading-auth/errors'
+import { hasUsableUserEmail } from '@/lib/user-email'
 import { defaultViemNetwork, defaultViemRpcUrl } from '@/lib/viem-network'
 import { signAndSubmitDepositWalletCalls } from '@/lib/wallet/client'
 import {
@@ -87,8 +88,38 @@ interface TradingOnboardingProviderContentProps {
   user: User | null
 }
 
-function hasUsableEmail(email?: string | null) {
-  return Boolean(email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(email))
+function isGeneratedDepositWalletUsername(username?: string | null, depositWalletAddress?: string | null) {
+  const trimmedUsername = username?.trim()
+  const trimmedDepositWalletAddress = depositWalletAddress?.trim()
+  if (!trimmedUsername || !trimmedDepositWalletAddress) {
+    return false
+  }
+
+  const prefix = `${trimmedDepositWalletAddress.toLowerCase()}-`
+  const normalizedUsername = trimmedUsername.toLowerCase()
+  if (!normalizedUsername.startsWith(prefix)) {
+    return false
+  }
+
+  return /^\d+$/.test(normalizedUsername.slice(prefix.length))
+}
+
+function hasUserProvidedUsername(user: User) {
+  const username = user.username?.trim()
+  return Boolean(
+    username
+    && !isGeneratedDepositWalletUsername(username, user.deposit_wallet_address),
+  )
+}
+
+function getUsernameDefaultValue(user: User | null) {
+  if (!user?.username) {
+    return ''
+  }
+  if (isGeneratedDepositWalletUsername(user.username, user.deposit_wallet_address)) {
+    return ''
+  }
+  return user.username
 }
 
 function useSessionRefresher() {
@@ -135,11 +166,11 @@ function useOnboardingStatus(user: User | null, requiresTradingAuthRefresh: bool
   return useMemo(() => {
     const onboardingSettings = user?.settings?.onboarding ?? {}
     const tradingAuthSettings = user?.settings?.tradingAuth ?? null
-    const hasUsername = Boolean(user?.username?.trim())
+    const hasUsername = Boolean(user && hasUserProvidedUsername(user))
     const needsUsername = Boolean(user && !hasUsername)
     const needsEmail = Boolean(
       user
-      && !hasUsableEmail(user.email)
+      && !hasUsableUserEmail(user.email)
       && !onboardingSettings.emailSkippedAt
       && !onboardingSettings.emailCompletedAt,
     )
@@ -432,6 +463,26 @@ function TradingOnboardingProviderContent({
       setActiveModal(modal)
       return
     }
+    if (modal === 'username' && status.needsUsername) {
+      setDismissedModal(null)
+      setActiveModal('username')
+      return
+    }
+    if (modal === 'email' && status.needsEmail) {
+      setDismissedModal(null)
+      setActiveModal('email')
+      return
+    }
+    if ((modal === 'enable' || modal === 'enable-status') && !enableTradingError) {
+      setDismissedModal(null)
+      setActiveModal(modal)
+      return
+    }
+    if (modal === 'approve' && !tokenApprovalError) {
+      setDismissedModal(null)
+      setActiveModal('approve')
+      return
+    }
     if (modal === 'auto-redeem') {
       setDismissedModal(modal)
       setActiveModal(null)
@@ -443,7 +494,13 @@ function TradingOnboardingProviderContent({
     setDismissedModal(modal)
     setActiveModal(null)
     setShouldContinueTradingAuthPrompt(false)
-  }, [openFundModalIfBalanceEmpty])
+  }, [
+    enableTradingError,
+    openFundModalIfBalanceEmpty,
+    status.needsEmail,
+    status.needsUsername,
+    tokenApprovalError,
+  ])
 
   const handleUsernameSubmit = useCallback(async (username: string, termsAccepted: boolean) => {
     if (isUsernameSubmitting) {
@@ -1198,11 +1255,11 @@ function TradingOnboardingProviderContent({
       <TradingOnboardingDialogs
         activeModal={activeModal}
         onModalOpenChange={handleModalOpenChange}
-        usernameDefaultValue={user?.username ?? ''}
+        usernameDefaultValue={getUsernameDefaultValue(user)}
         usernameError={usernameError}
         isUsernameSubmitting={isUsernameSubmitting}
         onUsernameSubmit={handleUsernameSubmit}
-        emailDefaultValue={hasUsableEmail(user?.email) ? user?.email ?? '' : ''}
+        emailDefaultValue={hasUsableUserEmail(user?.email) ? user?.email ?? '' : ''}
         emailError={emailError}
         isEmailSubmitting={isEmailSubmitting}
         onEmailSubmit={handleEmailSubmit}

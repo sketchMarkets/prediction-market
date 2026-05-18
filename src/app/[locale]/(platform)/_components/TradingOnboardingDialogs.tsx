@@ -26,8 +26,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+} from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
 import { InputError } from '@/components/ui/input-error'
+import { useIsMobile } from '@/hooks/useIsMobile'
 import { useSiteIdentity } from '@/hooks/useSiteIdentity'
 
 type OnboardingModal = 'username' | 'email' | 'enable' | 'enable-status' | 'approve' | 'auto-redeem' | null
@@ -79,25 +87,86 @@ function OnboardingDialogShell({
   title,
   description,
   children,
+  dismissible = true,
+  dialogContentClassName = 'max-w-md border bg-background p-8',
+  drawerContentClassName = 'max-h-[90vh] w-full bg-background px-4 pt-4 pb-6',
+  headerClassName = 'space-y-3 text-center',
+  titleClassName = 'text-center text-2xl font-bold text-foreground',
+  descriptionClassName = 'text-center text-base text-muted-foreground',
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   icon?: ReactNode
   title: string
-  description: string
+  description?: string | null
   children: ReactNode
+  dismissible?: boolean
+  dialogContentClassName?: string
+  drawerContentClassName?: string
+  headerClassName?: string
+  titleClassName?: string
+  descriptionClassName?: string
 }) {
+  const isMobile = useIsMobile()
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (!dismissible && !nextOpen) {
+      return
+    }
+    onOpenChange(nextOpen)
+  }
+
+  if (isMobile) {
+    return (
+      <Drawer
+        open={open}
+        onOpenChange={handleOpenChange}
+        dismissible={dismissible}
+      >
+        <DrawerContent className={drawerContentClassName}>
+          <DrawerHeader className={headerClassName}>
+            {icon}
+            <DrawerTitle className={titleClassName}>
+              {title}
+            </DrawerTitle>
+            {description && (
+              <DrawerDescription className={descriptionClassName}>
+                {description}
+              </DrawerDescription>
+            )}
+          </DrawerHeader>
+          {children}
+        </DrawerContent>
+      </Drawer>
+    )
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md border bg-background p-8">
-        <DialogHeader className="space-y-3 text-center">
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent
+        className={dialogContentClassName}
+        showCloseButton={dismissible}
+        onEscapeKeyDown={(event) => {
+          if (!dismissible) {
+            event.preventDefault()
+          }
+        }}
+        onInteractOutside={(event) => {
+          if (!dismissible) {
+            event.preventDefault()
+          }
+        }}
+      >
+        <DialogHeader className={headerClassName}>
           {icon}
-          <DialogTitle className="text-center text-2xl font-bold text-foreground">
+          <DialogTitle className={titleClassName}>
             {title}
           </DialogTitle>
-          <DialogDescription className="text-center text-base text-muted-foreground">
-            {description}
-          </DialogDescription>
+          {description && (
+            <DialogDescription className={descriptionClassName}>
+              {description}
+            </DialogDescription>
+          )}
         </DialogHeader>
         {children}
       </DialogContent>
@@ -234,6 +303,7 @@ function UsernameDialog({
       onOpenChange={onOpenChange}
       title={t('Choose a username')}
       description={t('You can update this later.')}
+      dismissible={false}
     >
       <form className="mt-6 space-y-5" onSubmit={handleSubmit}>
         <div className="relative">
@@ -362,6 +432,7 @@ function EmailDialog({
       onOpenChange={onOpenChange}
       title={t('What\'s your email?')}
       description={t('Add your email to receive market and trading notifications.')}
+      dismissible={false}
       icon={(
         <div className="mx-auto flex size-16 items-center justify-center rounded-2xl bg-primary/10 text-primary">
           <MailIcon className="size-8" />
@@ -418,6 +489,7 @@ function EnableTradingDialog({
   const t = useExtracted()
   const site = useSiteIdentity()
   const isLoading = step === 'enabling' || step === 'deploying'
+  const dismissible = Boolean(error)
 
   return (
     <OnboardingDialogShell
@@ -425,6 +497,7 @@ function EnableTradingDialog({
       onOpenChange={onOpenChange}
       title={t('Enable Trading')}
       description={t('Let\'s set up your wallet to trade on {siteName}.', { siteName: site.name })}
+      dismissible={dismissible}
       icon={(
         <div className="mx-auto flex size-20 items-center justify-center rounded-2xl bg-primary/10 text-primary">
           <WalletIcon className="size-10" />
@@ -473,47 +546,53 @@ function EnableTradingStatusDialog({
 }) {
   const t = useExtracted()
   const isSigning = step === 'enabling'
+  const dismissible = Boolean(error)
+
+  const timeline = (
+    <div className="mt-5 space-y-0">
+      <TimelineStep
+        title={t('Deploy Wallet')}
+        description={t('Deploy a smart contract wallet to enable trading')}
+        complete={hasDeployedDepositWallet}
+        trailing={hasDeployedDepositWallet ? t('Done') : null}
+      />
+      <TimelineStep
+        title={t('Enable Trading')}
+        description={t('Sign a message to generate your API keys')}
+        complete={hasTradingAuth}
+        trailing={hasTradingAuth ? t('Done') : null}
+        action={!hasTradingAuth && hasDeployedDepositWallet
+          ? {
+              label: t('Sign'),
+              loading: isSigning,
+              onClick: onEnableTradingAuth,
+            }
+          : undefined}
+        error={!hasTradingAuth ? error : null}
+      />
+      <TimelineStep
+        title={t('Approve Tokens')}
+        description={t('Approve token spending for trading')}
+        complete={hasTokenApprovals}
+        trailing={hasTokenApprovals ? t('Done') : null}
+        isLast
+      />
+    </div>
+  )
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm border bg-background p-6">
-        <DialogHeader className="space-y-2 text-center">
-          <DialogTitle className="text-center text-xl font-bold text-foreground">
-            {t('Enable Trading')}
-          </DialogTitle>
-        </DialogHeader>
-
-        <div className="mt-5 space-y-0">
-          <TimelineStep
-            title={t('Deploy Wallet')}
-            description={t('Deploy a smart contract wallet to enable trading')}
-            complete={hasDeployedDepositWallet}
-            trailing={hasDeployedDepositWallet ? t('Done') : null}
-          />
-          <TimelineStep
-            title={t('Enable Trading')}
-            description={t('Sign a message to generate your API keys')}
-            complete={hasTradingAuth}
-            trailing={hasTradingAuth ? t('Done') : null}
-            action={!hasTradingAuth && hasDeployedDepositWallet
-              ? {
-                  label: t('Sign'),
-                  loading: isSigning,
-                  onClick: onEnableTradingAuth,
-                }
-              : undefined}
-            error={!hasTradingAuth ? error : null}
-          />
-          <TimelineStep
-            title={t('Approve Tokens')}
-            description={t('Approve token spending for trading')}
-            complete={hasTokenApprovals}
-            trailing={hasTokenApprovals ? t('Done') : null}
-            isLast
-          />
-        </div>
-      </DialogContent>
-    </Dialog>
+    <OnboardingDialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t('Enable Trading')}
+      description={null}
+      dismissible={dismissible}
+      dialogContentClassName="max-w-sm border bg-background p-6"
+      headerClassName="space-y-2 text-center"
+      titleClassName="text-center text-xl font-bold text-foreground"
+    >
+      {timeline}
+    </OnboardingDialogShell>
   )
 }
 
@@ -593,6 +672,7 @@ function ApproveTokensDialog({
 }) {
   const t = useExtracted()
   const isLoading = step === 'signing'
+  const dismissible = Boolean(error)
 
   return (
     <OnboardingDialogShell
@@ -600,6 +680,7 @@ function ApproveTokensDialog({
       onOpenChange={onOpenChange}
       title={t('Approve Tokens')}
       description={t('Approve token spending for trading')}
+      dismissible={dismissible}
       icon={(
         <div className="mx-auto flex size-20 items-center justify-center rounded-2xl bg-primary/10 text-primary">
           <WalletIcon className="size-10" />
