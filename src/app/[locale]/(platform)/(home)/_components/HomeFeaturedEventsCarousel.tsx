@@ -56,11 +56,17 @@ import { useHasHydrated } from '@/hooks/useHasHydrated'
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { useSiteIdentity } from '@/hooks/useSiteIdentity'
 import { Link } from '@/i18n/navigation'
+import { getAvatarPlaceholderStyle, shouldUseAvatarPlaceholder } from '@/lib/avatar'
 import { ensureReadableTextColorOnDark } from '@/lib/color-contrast'
 import { resolveEventOutcomePath, resolveEventPagePath } from '@/lib/events-routing'
 import { formatDollarValueLabel, formatVolume } from '@/lib/formatters'
 import { resolveHomeFeaturedSportsScoreboardContent } from '@/lib/home-featured-sports-score'
 import { resolveSportsTeamFallbackClassName } from '@/lib/sports-team-colors'
+import {
+  preserveSportsButtonPeriodSuffix,
+  resolveCompactSportsTeamNames,
+  resolveSportsButtonPeriodSuffix,
+} from '@/lib/sports-team-label'
 import { cn } from '@/lib/utils'
 
 interface HomeFeaturedEventsCarouselProps {
@@ -624,7 +630,9 @@ function SportsMoneylineButtons({
             groupLabel={t('Moneyline')}
             market={toFeaturedSportsButtonMarket(
               button,
-              isDraw ? t('Draw') : resolveMoneylineButtonLabel(card, button),
+              isDraw
+                ? preserveSportsButtonPeriodSuffix(t('Draw'), button.label)
+                : resolveMoneylineButtonLabel(card, moneylineButtons, button),
             )}
             href={resolveFeaturedSportsButtonHref(card, button, linkedHref)}
             className={cn(
@@ -658,14 +666,28 @@ function compareSportsButtonsByTone(left: SportsGamesButton, right: SportsGamesB
   return left.key.localeCompare(right.key)
 }
 
-function resolveMoneylineButtonLabel(card: SportsGamesCard, button: SportsGamesButton) {
-  if (button.tone === 'team1') {
-    return card.teams[0]?.name ?? button.label
+function resolveMoneylineButtonLabel(
+  card: SportsGamesCard,
+  buttons: SportsGamesButton[],
+  button: SportsGamesButton,
+) {
+  if (button.tone !== 'team1' && button.tone !== 'team2') {
+    return button.label
   }
-  if (button.tone === 'team2') {
-    return card.teams[1]?.name ?? button.label
-  }
-  return button.label
+
+  const periodSuffix = resolveSportsButtonPeriodSuffix(button.label)
+  const team1Button = buttons.find(candidate =>
+    candidate.tone === 'team1'
+    && resolveSportsButtonPeriodSuffix(candidate.label) === periodSuffix)
+  const team2Button = buttons.find(candidate =>
+    candidate.tone === 'team2'
+    && resolveSportsButtonPeriodSuffix(candidate.label) === periodSuffix)
+  const labels = resolveCompactSportsTeamNames(
+    { name: card.teams[0]?.name, fallback: team1Button?.label ?? button.label },
+    { name: card.teams[1]?.name, fallback: team2Button?.label ?? button.label },
+  )
+
+  return button.tone === 'team1' ? labels[0] : labels[1]
 }
 
 function resolveFeaturedSportsButtonTone(button: SportsGamesButton): FeaturedSportsButtonTone {
@@ -1037,14 +1059,26 @@ function ContextAvatar({ contextItem }: { contextItem: HomeFeaturedContextItem }
     )
   }
 
-  if (contextItem.type === 'comment' && contextItem.avatarUrl) {
+  if (contextItem.type === 'comment') {
+    const avatarUrl = contextItem.avatarUrl?.trim() ?? ''
+
+    if (!shouldUseAvatarPlaceholder(avatarUrl)) {
+      return (
+        <EventIconImage
+          src={avatarUrl}
+          alt={contextItem.source}
+          sizes="28px"
+          containerClassName="size-7 shrink-0 rounded-full bg-muted"
+          imageClassName="rounded-full"
+        />
+      )
+    }
+
     return (
-      <EventIconImage
-        src={contextItem.avatarUrl}
-        alt={contextItem.source}
-        sizes="28px"
-        containerClassName="size-7 shrink-0 rounded-full bg-muted"
-        imageClassName="rounded-full"
+      <span
+        aria-hidden="true"
+        className="size-7 shrink-0 rounded-full border border-border/80"
+        style={getAvatarPlaceholderStyle(contextItem.avatarSeed?.trim() || contextItem.source.trim() || 'user')}
       />
     )
   }
