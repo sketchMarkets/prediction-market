@@ -11,6 +11,7 @@ import { useAppKitAccount } from '@reown/appkit/react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useExtracted, useLocale } from 'next-intl'
 import Form from 'next/form'
+import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { toast } from 'sonner'
 import { useAccount, useConfig, useSignTypedData } from 'wagmi'
@@ -18,6 +19,8 @@ import { getConnections, signTypedData as signTypedDataAction, switchChain } fro
 import { useTradingOnboarding } from '@/app/[locale]/(platform)/_providers/TradingOnboardingProvider'
 import { useOrderBookSummaries } from '@/app/[locale]/(platform)/event/[slug]/_components/EventOrderBook'
 import EventOrderPanelArbitrage from '@/app/[locale]/(platform)/event/[slug]/_components/EventOrderPanelArbitrage'
+import EventOrderPanelAwaitingResolutionDisplay
+  from '@/app/[locale]/(platform)/event/[slug]/_components/EventOrderPanelAwaitingResolutionDisplay'
 import EventOrderPanelBuySellTabs from '@/app/[locale]/(platform)/event/[slug]/_components/EventOrderPanelBuySellTabs'
 import EventOrderPanelMarketInfo from '@/app/[locale]/(platform)/event/[slug]/_components/EventOrderPanelMarketInfo'
 import EventOrderPanelMobileMarketInfo
@@ -62,6 +65,10 @@ import { CLOB_ORDER_TYPE, getExchangeEip712Domain, ORDER_SIDE, ORDER_TYPE, OUTCO
 import { resolveEventPagePath } from '@/lib/events-routing'
 import { formatCentsLabel, formatCentsValueLabel, formatCurrency, formatDollarValueLabel, formatSharesLabel, toCents } from '@/lib/formatters'
 import { resolveFallbackOutcomeUnitPrice, resolveMarketOutcome } from '@/lib/market-pricing'
+import {
+  getMarketEndTimestamp,
+  isMarketEnded,
+} from '@/lib/mirror-resolution'
 import {
   isCurrentNegRiskAdapterAddress,
   resolveNegRiskAdapterAddressFromMetadata,
@@ -807,6 +814,64 @@ function useOrderValidationFeedback() {
   }
 }
 
+const MAX_MARKET_END_TIMEOUT_MS = 2_147_483_647
+
+function useHasReachedMarketEnd(market: Market | null | undefined) {
+  const endTimestamp = market ? getMarketEndTimestamp(market) : null
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    if (endTimestamp == null) {
+      return () => {}
+    }
+
+    let timeout: number | null = null
+    const scheduledEndTimestamp = endTimestamp
+
+    function scheduleMarketEndUpdate() {
+      const remainingMs = scheduledEndTimestamp - Date.now()
+      timeout = window.setTimeout(() => {
+        if (Date.now() >= scheduledEndTimestamp) {
+          onStoreChange()
+          return
+        }
+        scheduleMarketEndUpdate()
+      }, Math.max(0, Math.min(remainingMs, MAX_MARKET_END_TIMEOUT_MS)))
+    }
+
+    scheduleMarketEndUpdate()
+    return () => {
+      if (timeout != null) {
+        window.clearTimeout(timeout)
+      }
+    }
+  }, [endTimestamp])
+  const getSnapshot = useCallback(
+    () => endTimestamp != null && Date.now() >= endTimestamp,
+    [endTimestamp],
+  )
+  const getServerSnapshot = useCallback(() => false, [])
+
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+}
+
+function useAwaitingResolutionRefresh(enabled: boolean) {
+  const router = useRouter()
+
+  useEffect(function refreshEventWhileAwaitingResolution() {
+    if (!enabled) {
+      return
+    }
+
+    function refreshWhenVisible() {
+      if (!document.hidden) {
+        router.refresh()
+      }
+    }
+
+    const interval = window.setInterval(refreshWhenVisible, 5_000)
+    return () => window.clearInterval(interval)
+  }, [enabled, router])
+}
+
 export default function EventOrderPanelForm({
   event,
   isMobile,
@@ -852,7 +917,10 @@ export default function EventOrderPanelForm({
     && event.markets.some(market => market.condition_id === state.market?.condition_id),
   )
   const activeEvent: Event = hasMatchingStoreEvent && state.event ? state.event : event
-  const activeMarket = hasMatchingStoreMarket ? state.market : initialMarket
+  const matchingEventMarket = hasMatchingStoreMarket && state.market
+    ? event.markets.find(market => market.condition_id === state.market?.condition_id)
+    : null
+  const activeMarket = matchingEventMarket ?? initialMarket
   const fallbackOutcome = useMemo(() => {
     if (initialOutcome) {
       return initialOutcome
@@ -977,8 +1045,20 @@ export default function EventOrderPanelForm({
     currentTimestamp,
     resolveDisplayOutcomeLabel,
   })
-  const isPausedMarket = Boolean(activeMarket && activeMarket.accepting_orders === false && !isResolvedMarket)
-  const isTradingDisabled = isResolvedMarket || isPausedMarket
+  const hasReachedMarketEnd = useHasReachedMarketEnd(activeMarket)
+  const isAwaitingResolution = Boolean(
+    activeMarket
+    && hasReachedMarketEnd
+    && !isResolvedMarket,
+  )
+  const isPausedMarket = Boolean(
+    activeMarket
+    && activeMarket.accepting_orders === false
+    && !isAwaitingResolution
+    && !isResolvedMarket,
+  )
+  const isTradingDisabled = isResolvedMarket || isAwaitingResolution || isPausedMarket
+  useAwaitingResolutionRefresh(isAwaitingResolution)
   const orderDomain = useMemo(() => getExchangeEip712Domain(isNegRiskMarket), [isNegRiskMarket])
   const { positionsQuery, aggregatedPositionShares } = useEventOrderPanelPositions({
     makerAddress,
@@ -1209,7 +1289,20 @@ export default function EventOrderPanelForm({
     setTimeout(setShouldShakeInput, 320, false)
   }
 
+  function ensureMarketAcceptsSubmission(market: Market | null | undefined) {
+    if (!market || !isMarketEnded(market, Date.now())) {
+      return true
+    }
+
+    toast.info(t('Market Paused'))
+    return false
+  }
+
   async function submitOrderFlow(options: { confirmedSlippageWarning?: boolean } = {}) {
+    if (!ensureMarketAcceptsSubmission(activeMarket)) {
+      return
+    }
+
     if (options.confirmedSlippageWarning) {
       clearSlippageWarning()
     }
@@ -1457,6 +1550,10 @@ export default function EventOrderPanelForm({
 
     state.setIsLoading(true)
     try {
+      if (!ensureMarketAcceptsSubmission(activeMarket)) {
+        return
+      }
+
       const result = await submitOrder({
         order: payload,
         signature,
@@ -1595,6 +1692,9 @@ export default function EventOrderPanelForm({
   }
 
   async function onSubmit() {
+    if (!ensureMarketAcceptsSubmission(activeMarket)) {
+      return
+    }
     await submitOrderFlow()
   }
 
@@ -1775,6 +1875,9 @@ export default function EventOrderPanelForm({
     if (!ensureTradingReady() || !activeMarket || !makerAddress || !userAddress) {
       return
     }
+    if (!ensureMarketAcceptsSubmission(activeMarket)) {
+      return
+    }
     if (!(quote.totalCost > 0) || !(quote.shares > 0)) {
       toast.error(t('Enter a valid amount.'))
       return
@@ -1889,6 +1992,10 @@ export default function EventOrderPanelForm({
       )
 
       setArbitrageSubmissionStep(3)
+      if (!ensureMarketAcceptsSubmission(activeMarket)) {
+        return
+      }
+
       const [kuestResult, polymarketResult] = await Promise.allSettled([
         submitOrder({
           order: kuestOrder,
@@ -1986,6 +2093,9 @@ export default function EventOrderPanelForm({
 
   async function handleOutcomeArbitrageSubmit(quote: OutcomeArbitrageQuote) {
     if (!ensureTradingReady() || !activeMarket || !makerAddress || !userAddress) {
+      return
+    }
+    if (!ensureMarketAcceptsSubmission(activeMarket)) {
       return
     }
     if (isNegRiskMarket && !isCurrentNegRiskAdapterAddress(negRiskAdapterAddress)) {
@@ -2112,6 +2222,10 @@ export default function EventOrderPanelForm({
       )
 
       setArbitrageSubmissionStep(3)
+      if (!ensureMarketAcceptsSubmission(activeMarket)) {
+        return
+      }
+
       const batchResult = await submitOrders([
         {
           order: yesOrder,
@@ -2234,22 +2348,28 @@ export default function EventOrderPanelForm({
           )
         )}
         {isTradingDisabled
-          ? (
-              <EventOrderPanelResolvedMarketDisplay
-                variant={isPausedMarket ? 'paused' : 'resolved'}
-                resolvedOutcomeLabel={resolvedOutcomeLabel}
-                isSingleMarket={isSingleMarket}
-                shouldShowResolvedSportsSubtitle={shouldShowResolvedSportsSubtitle}
-                resolvedMarketTitle={resolvedMarketTitle}
-                hasClaimableWinnings={hasClaimableWinnings}
-                claimPositionLabel={claimPositionLabel}
-                claimValuePerShareLabel={claimValuePerShareLabel}
-                claimTotalLabel={claimTotalLabel}
-                isClaimSubmitting={isClaimSubmitting}
-                isPositionsLoading={positionsQuery.isLoading}
-                onClaimWinnings={handleClaimWinnings}
-              />
-            )
+          ? isAwaitingResolution
+            ? (
+                <EventOrderPanelAwaitingResolutionDisplay
+                  marketTitle={activeMarket?.title?.trim() || activeMarket?.short_title?.trim() || event.title}
+                />
+              )
+            : (
+                <EventOrderPanelResolvedMarketDisplay
+                  variant={isPausedMarket ? 'paused' : 'resolved'}
+                  resolvedOutcomeLabel={resolvedOutcomeLabel}
+                  isSingleMarket={isSingleMarket}
+                  shouldShowResolvedSportsSubtitle={shouldShowResolvedSportsSubtitle}
+                  resolvedMarketTitle={resolvedMarketTitle}
+                  hasClaimableWinnings={hasClaimableWinnings}
+                  claimPositionLabel={claimPositionLabel}
+                  claimValuePerShareLabel={claimValuePerShareLabel}
+                  claimTotalLabel={claimTotalLabel}
+                  isClaimSubmitting={isClaimSubmitting}
+                  isPositionsLoading={positionsQuery.isLoading}
+                  onClaimWinnings={handleClaimWinnings}
+                />
+              )
           : (
               <>
                 <EventOrderPanelBuySellTabs
