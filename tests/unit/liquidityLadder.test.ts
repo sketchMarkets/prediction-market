@@ -1,5 +1,6 @@
-import type { Market } from '@/types'
 import { describe, expect, it } from 'vitest'
+
+import { MAX_ORDER_SUBMISSION_ORDERS } from '@/lib/constants'
 import {
   buildLiquidityLadder,
   canProvideMarketLiquidity,
@@ -61,11 +62,12 @@ describe('liquidity ladder', () => {
       sharesPerOrder: 1,
     })
 
+    expect(MAX_LIQUIDITY_LADDER_LEVELS).toBe(Math.floor(MAX_ORDER_SUBMISSION_ORDERS / 4))
     expect(orders).toHaveLength(MAX_LIQUIDITY_LADDER_LEVELS * 4)
     expect(getLiquidityLadderRequirements(orders)).toMatchObject({
-      bidCost: 3.876,
-      splitShares: 4,
-      signatureCount: 17,
+      bidCost: 6.5688,
+      splitShares: 7,
+      signatureCount: 29,
     })
   })
 
@@ -74,13 +76,15 @@ describe('liquidity ladder', () => {
     { levelsPerSide: Number.POSITIVE_INFINITY },
     { priceStepCents: Number.NaN },
   ])('rejects non-finite ladder inputs: %o', (invalidInput) => {
-    expect(buildLiquidityLadder({
-      centerPriceCents: 50,
-      levelsPerSide: 3,
-      priceStepCents: 2,
-      sharesPerOrder: 5,
-      ...invalidInput,
-    })).toEqual([])
+    expect(
+      buildLiquidityLadder({
+        centerPriceCents: 50,
+        levelsPerSide: 3,
+        priceStepCents: 2,
+        sharesPerOrder: 5,
+        ...invalidInput,
+      }),
+    ).toEqual([])
   })
 
   it('only enables provisioning while a binary market can accept orders', () => {
@@ -99,10 +103,15 @@ describe('liquidity ladder', () => {
     expect(canProvideMarketLiquidity(market, Date.now())).toBe(true)
     expect(canProvideMarketLiquidity({ ...market, accepting_orders: false }, Date.now())).toBe(false)
     expect(canProvideMarketLiquidity({ ...market, is_resolved: true }, Date.now())).toBe(false)
-    expect(canProvideMarketLiquidity({
-      ...market,
-      end_time: '2026-01-01T00:00:00.000Z',
-      metadata: { mirror_resolution_type: 'chainlink' },
-    }, Date.parse('2026-01-01T00:00:01.000Z'))).toBe(false)
+    expect(
+      canProvideMarketLiquidity(
+        {
+          ...market,
+          end_time: '2026-01-01T00:00:00.000Z',
+          metadata: { mirror_resolution_type: 'chainlink' },
+        },
+        Date.parse('2026-01-01T00:00:01.000Z'),
+      ),
+    ).toBe(false)
   })
 })
