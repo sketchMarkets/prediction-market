@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseTradeAlertPayload } from '@/lib/trade-alerts'
+import { parseTradeAlertPayload, shouldDisplayTradeAlertToast } from '@/lib/trade-alerts'
 
 const origin = 'https://example.com'
 
@@ -14,6 +14,15 @@ function payload(overrides: Record<string, unknown> = {}) {
     message: 'Bruno bought 420 YES in Market',
     market_title: 'Market',
     market_icon: '/market.png',
+    event_title: 'Event',
+    event_icon: '/event.png',
+    trader: 'Bruno',
+    trader_avatar: '/bruno.png',
+    side: 'BUY',
+    shares: 420,
+    average_price: 0.9,
+    total_value: 378,
+    outcome: 'YES',
     url: `${origin}/event/example/market`,
     created_at: new Date(now - 1_000).toISOString(),
     expires_at: new Date(now + 14 * 60_000).toISOString(),
@@ -30,6 +39,10 @@ describe('trade alert validation', () => {
       followed_wallet: '0xabc',
       condition_id: '0xdef',
       url: `${origin}/event/example/market`,
+      trader_avatar: '/bruno.png',
+      average_price: 0.9,
+      total_value: 378,
+      event_title: 'Event',
     })
   })
 
@@ -39,5 +52,11 @@ describe('trade alert validation', () => {
 
     expect(expired).toBeNull()
     expect(safe?.url).toBe(origin)
+  })
+
+  it('shows an in-app toast only while the site is visible and focused', () => {
+    expect(shouldDisplayTradeAlertToast('visible', true)).toBe(true)
+    expect(shouldDisplayTradeAlertToast('visible', false)).toBe(false)
+    expect(shouldDisplayTradeAlertToast('hidden', true)).toBe(false)
   })
 })

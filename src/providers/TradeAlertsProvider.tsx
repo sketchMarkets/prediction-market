@@ -5,13 +5,18 @@ import type { ReactNode } from 'react'
 import { useExtracted, useLocale } from 'next-intl'
 import { useEffect, useRef, useState } from 'react'
 
+import {
+  FollowedTradeAvatar,
+  FollowedTradeMarketContext,
+  FollowedTradeSummary,
+} from '@/components/FollowedTradeNotification'
 import { toast } from '@/components/ui/toast'
 import { usePublicRuntimeConfig } from '@/hooks/usePublicRuntimeConfig'
 import { detachTradeAlertsBeforeLogout } from '@/hooks/useTradeAlerts'
 import { COMMUNITY_AUTH_CHANGED_EVENT, loadCommunityAuth } from '@/lib/community-auth'
 import { upsertCommunityPushSubscription } from '@/lib/community-push'
 import { buildCommunityApiUrl } from '@/lib/community-url'
-import { parseTradeAlertPayload } from '@/lib/trade-alerts'
+import { parseTradeAlertPayload, shouldDisplayTradeAlertToast } from '@/lib/trade-alerts'
 import {
   cleanupTradeAlerts,
   getTradeAlertsNeedsSync,
@@ -176,17 +181,45 @@ export default function TradeAlertsProvider({ children }: { children: ReactNode 
         }
         await cleanupTradeAlerts()
         const result = await putTradeAlert(payload, { origin: window.location.origin })
+        useTradeAlertsStore.getState().prependAlert(result.alert)
         if (!result.isNew) {
           return
         }
-        useTradeAlertsStore.getState().prependAlert(result.alert)
-        toast.info(payload.message, {
-          id: payload.notification_id,
-          action: {
-            label: payload.market_title,
+        if (!shouldDisplayTradeAlertToast(document.visibilityState, document.hasFocus())) {
+          return
+        }
+        const hasStructuredSummary = Boolean(payload.trader && payload.side && payload.outcome)
+        toast.message(
+          hasStructuredSummary ? (
+            <FollowedTradeSummary
+              trader={payload.trader!}
+              side={payload.side!}
+              outcome={payload.outcome!}
+              averagePrice={payload.average_price}
+              totalValue={payload.total_value}
+            />
+          ) : (
+            payload.message
+          ),
+          {
+            id: payload.notification_id,
+            description: (
+              <FollowedTradeMarketContext
+                eventTitle={payload.event_title || payload.market_title}
+                eventIcon={payload.event_icon || payload.market_icon}
+              />
+            ),
+            image: (
+              <FollowedTradeAvatar
+                trader={payload.trader || payload.followed_wallet}
+                wallet={payload.followed_wallet}
+                src={payload.trader_avatar}
+                size={40}
+              />
+            ),
             onClick: () => window.location.assign(payload.url),
           },
-        })
+        )
       }
 
       function handleServiceWorkerMessage(event: MessageEvent) {
