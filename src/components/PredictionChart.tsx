@@ -11,7 +11,11 @@ import {
   PredictionChartAnnotationTooltip,
   resolveAnnotationMarkers,
 } from '@/components/PredictionChartAnnotations'
-import { drawPredictionChartCanvas, type PredictionChartCanvasFrame } from '@/components/PredictionChartCanvasRenderer'
+import {
+  drawPredictionChartCanvas,
+  type PredictionChartCanvasFrame,
+  resolvePredictionChartCanvasValuesAtX,
+} from '@/components/PredictionChartCanvasRenderer'
 import PredictionChartHeader from '@/components/PredictionChartHeader'
 import PredictionChartTooltipOverlay from '@/components/PredictionChartTooltipOverlay'
 import useDarkMode from '@/hooks/useDarkMode'
@@ -41,10 +45,25 @@ const MIN_Y_AXIS_TICKS = 3
 const PREFERRED_MAX_Y_AXIS_TICKS = 5
 const MAX_Y_AXIS_TICKS = 6
 const MARKER_PULSE_DURATION = 2600
+const INITIAL_REVEAL_DURATION = 1400
+const INTERACTION_REVEAL_DURATION = 1100
+const SURGE_DURATION = 760
 
 interface CursorState {
+  progress: number
+}
+
+interface ResolvedCursor {
   point: DataPoint
   left: number
+}
+
+interface EntryAnimationState {
+  duration: number
+  fromProgress: number
+  muteUnrevealedSeries: boolean
+  surgeAfterReveal: boolean
+  startedAt: number | null
 }
 
 interface TooltipEntry {
@@ -219,9 +238,14 @@ export default function PredictionChart({
 }: PredictionChartProps): ReactElement {
   const series = useMemo(() => providedSeries ?? [], [providedSeries])
   const normalizedSignature = dataSignature ?? '__default__'
-  const { data, isClient } = usePredictionChartData(providedData, normalizedSignature, dataSyncMode)
+  const { data, isClient, lastDataUpdateTypeRef, previousDataRef } = usePredictionChartData(
+    providedData,
+    normalizedSignature,
+    dataSyncMode,
+  )
   const isDarkMode = useDarkMode()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const entryAnimationRef = useRef<EntryAnimationState | null>(null)
   const [cursor, setCursor] = useState<CursorState | null>(null)
   const annotationScopeKey = `${normalizedSignature}:${showAnnotations ? '1' : '0'}`
   const [annotationHoverState, setAnnotationHoverState] = useState<{
@@ -294,6 +318,84 @@ export default function PredictionChart({
     }
     return { start: data[0].date.getTime(), end: data.at(-1)!.date.getTime() }
   }, [data])
+  const resolvedLineEndOffsetX = Number.isFinite(lineEndOffsetX) ? Math.min(0, lineEndOffsetX) : 0
+  const cursorRangeEnd = Math.max(1, innerWidth + resolvedLineEndOffsetX)
+
+  const resolveCursorAtProgress = useCallback(
+    (progress: number): ResolvedCursor | null => {
+      if (!data.length || !series.length) {
+        return null
+      }
+
+      const clampedProgress = Math.max(0, Math.min(1, progress))
+      const rawTimestamp = domainBounds.start + clampedProgress * (domainBounds.end - domainBounds.start)
+      let targetTimestamp = rawTimestamp
+
+      if (cursorStepMs && cursorStepMs > 0) {
+        targetTimestamp = snapTimestampToInterval(rawTimestamp, cursorStepMs, domainBounds.start)
+      }
+      targetTimestamp = Math.max(domainBounds.start, Math.min(domainBounds.end, targetTimestamp))
+      if (clampCursorToDataExtent && dataBounds) {
+        targetTimestamp = Math.max(dataBounds.start, Math.min(dataBounds.end, targetTimestamp))
+      }
+
+      const targetDate = new Date(targetTimestamp)
+      const basePoint = interpolateCursorPoint(
+        data,
+        series.map((seriesItem) => seriesItem.key),
+        targetDate,
+      )
+      if (!basePoint) {
+        return null
+      }
+
+      const timestampProgress =
+        (targetTimestamp - domainBounds.start) / Math.max(1, domainBounds.end - domainBounds.start)
+      const left = Math.max(0, Math.min(cursorRangeEnd, timestampProgress * cursorRangeEnd))
+      const curveValues = resolvePredictionChartCanvasValuesAtX(
+        {
+          width,
+          height,
+          margin: resolvedMargin,
+          data,
+          series,
+          domainStart: domainBounds.start,
+          domainEnd: domainBounds.end,
+          yMin: yAxisMin,
+          yMax: yAxisMax,
+          lineCurve,
+          lineEndOffsetX: resolvedLineEndOffsetX,
+        },
+        resolvedMargin.left + left,
+      )
+
+      return {
+        point: { ...basePoint, ...curveValues },
+        left,
+      }
+    },
+    [
+      clampCursorToDataExtent,
+      cursorRangeEnd,
+      cursorStepMs,
+      data,
+      dataBounds,
+      domainBounds.end,
+      domainBounds.start,
+      height,
+      lineCurve,
+      resolvedLineEndOffsetX,
+      resolvedMargin,
+      series,
+      width,
+      yAxisMax,
+      yAxisMin,
+    ],
+  )
+  const resolvedCursor = useMemo(
+    () => (cursor ? resolveCursorAtProgress(cursor.progress) : null),
+    [cursor, resolveCursorAtProgress],
+  )
 
   const resolvedXAxisTicks = useMemo(() => {
     const explicitTicks = xAxisTickValues
@@ -362,9 +464,9 @@ export default function PredictionChart({
       }
     : null
 
-  const tooltipEntries = cursor
+  const tooltipEntries = resolvedCursor
     ? series.reduce<TooltipEntry[]>((entries, seriesItem) => {
-        const value = cursor.point[seriesItem.key]
+        const value = resolvedCursor.point[seriesItem.key]
         if (typeof value === 'number' && Number.isFinite(value)) {
           entries.push({
             key: seriesItem.key,
@@ -404,7 +506,12 @@ export default function PredictionChart({
   const axisLabelOpacity = neutralAxisColors ? 1 : Math.min(1, defaultGridLineOpacity + 0.25)
 
   const createCanvasFrame = useCallback(
-    (markerPulseProgress: number): PredictionChartCanvasFrame => ({
+    (
+      markerPulseProgress: number,
+      revealProgress = 1,
+      surgeProgress: number | null = null,
+      muteUnrevealedSeries = false,
+    ): PredictionChartCanvasFrame => ({
       width,
       height,
       margin: resolvedMargin,
@@ -449,11 +556,20 @@ export default function PredictionChart({
       markerPulseStyle,
       markerOffsetX,
       markerPulseProgress,
-      cursor: cursor
+      revealProgress,
+      muteUnrevealedSeries,
+      surge:
+        surgeProgress == null
+          ? null
+          : {
+              color: isDarkMode ? 'rgba(255, 255, 255, 0.82)' : 'rgba(15, 23, 42, 0.55)',
+              progress: surgeProgress,
+            },
+      cursor: resolvedCursor
         ? {
-            x: cursor.left,
+            x: resolvedCursor.left,
             values: series.reduce<Record<string, number>>((values, seriesItem) => {
-              const value = cursor.point[seriesItem.key]
+              const value = resolvedCursor.point[seriesItem.key]
               if (typeof value === 'number' && Number.isFinite(value)) {
                 values[seriesItem.key] = value
               }
@@ -478,7 +594,7 @@ export default function PredictionChart({
       axisLabelColor,
       axisLabelOpacity,
       centerXAxisTickLabels,
-      cursor,
+      resolvedCursor,
       cursorGuideColor,
       cursorGuideTop,
       data,
@@ -530,11 +646,55 @@ export default function PredictionChart({
         return
       }
 
+      if (lastDataUpdateTypeRef.current === 'reset') {
+        entryAnimationRef.current =
+          _disableResetAnimation || data.length < 2 || series.length === 0
+            ? null
+            : {
+                duration: INITIAL_REVEAL_DURATION,
+                fromProgress: 0,
+                muteUnrevealedSeries: false,
+                startedAt: null,
+                surgeAfterReveal: true,
+              }
+        lastDataUpdateTypeRef.current = 'none'
+      }
+      previousDataRef.current = data
+
       let frameId: number | null = null
       function draw(timestamp: number) {
+        const entryAnimation = entryAnimationRef.current
+        let revealProgress = 1
+        let surgeProgress: number | null = null
+        let muteUnrevealedSeries = false
+
+        if (entryAnimation) {
+          entryAnimation.startedAt ??= timestamp
+          const elapsed = Math.max(0, timestamp - entryAnimation.startedAt)
+          const revealLinearProgress = Math.min(1, elapsed / entryAnimation.duration)
+          const easedProgress = 1 - (1 - revealLinearProgress) ** 3
+          revealProgress = entryAnimation.fromProgress + (1 - entryAnimation.fromProgress) * easedProgress
+          muteUnrevealedSeries = entryAnimation.muteUnrevealedSeries
+
+          if (revealLinearProgress >= 1 && entryAnimation.surgeAfterReveal) {
+            const resolvedSurgeProgress = Math.min(1, (elapsed - entryAnimation.duration) / SURGE_DURATION)
+            surgeProgress = resolvedSurgeProgress
+            if (resolvedSurgeProgress >= 1) {
+              entryAnimationRef.current = null
+              surgeProgress = null
+            }
+          } else if (revealLinearProgress >= 1) {
+            entryAnimationRef.current = null
+            muteUnrevealedSeries = false
+          }
+        }
+
         const pulseProgress = (timestamp % MARKER_PULSE_DURATION) / MARKER_PULSE_DURATION
-        const didDraw = drawPredictionChartCanvas(canvas!, createCanvasFrame(pulseProgress))
-        if (didDraw && data.length > 0 && series.length > 0 && !cursor) {
+        const didDraw = drawPredictionChartCanvas(
+          canvas!,
+          createCanvasFrame(pulseProgress, revealProgress, surgeProgress, muteUnrevealedSeries),
+        )
+        if (didDraw && data.length > 0 && series.length > 0 && !resolvedCursor) {
           frameId = window.requestAnimationFrame(draw)
         }
       }
@@ -546,7 +706,16 @@ export default function PredictionChart({
         }
       }
     },
-    [createCanvasFrame, cursor, data.length, isClient, series.length],
+    [
+      _disableResetAnimation,
+      createCanvasFrame,
+      data,
+      isClient,
+      lastDataUpdateTypeRef,
+      previousDataRef,
+      resolvedCursor,
+      series.length,
+    ],
   )
 
   const emitCursorChange = useCallback(
@@ -571,41 +740,34 @@ export default function PredictionChart({
     [onCursorDataChange, series],
   )
 
+  useLayoutEffect(
+    function syncCursorWithLatestSeries() {
+      if (resolvedCursor) {
+        emitCursorChange(resolvedCursor.point)
+      }
+    },
+    [emitCursorChange, resolvedCursor],
+  )
+
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
       if (!data.length || !series.length) {
         return
       }
 
+      entryAnimationRef.current = null
+
       const rect = event.currentTarget.getBoundingClientRect()
       const renderedX = rect.width > 0 ? ((event.clientX - rect.left) / rect.width) * width : 0
       const renderedY = rect.height > 0 ? ((event.clientY - rect.top) / rect.height) * height : 0
-      const localX = Math.max(0, Math.min(innerWidth, renderedX - resolvedMargin.left))
+      const localX = Math.max(0, Math.min(cursorRangeEnd, renderedX - resolvedMargin.left))
       const localY = renderedY - resolvedMargin.top
-      const rawTimestamp = domainBounds.start + (localX / innerWidth) * (domainBounds.end - domainBounds.start)
-      let targetTimestamp = rawTimestamp
-
-      if (cursorStepMs && cursorStepMs > 0) {
-        targetTimestamp = snapTimestampToInterval(rawTimestamp, cursorStepMs, domainBounds.start)
-      }
-      targetTimestamp = Math.max(domainBounds.start, Math.min(domainBounds.end, targetTimestamp))
-      if (clampCursorToDataExtent && dataBounds) {
-        targetTimestamp = Math.max(dataBounds.start, Math.min(dataBounds.end, targetTimestamp))
-      }
-
-      const targetDate = new Date(targetTimestamp)
-      const point = interpolateCursorPoint(
-        data,
-        series.map((seriesItem) => seriesItem.key),
-        targetDate,
-      )
-      if (!point) {
+      const progress = localX / cursorRangeEnd
+      if (!resolveCursorAtProgress(progress)) {
         return
       }
 
-      const cursorLeft = ((targetTimestamp - domainBounds.start) / (domainBounds.end - domainBounds.start)) * innerWidth
-      setCursor({ point, left: cursorLeft })
-      emitCursorChange(point)
+      setCursor({ progress })
 
       const nearestAnnotation = resolvedAnnotationClusters.find((cluster) => {
         const distance = Math.hypot(cluster.x - localX, cluster.y - localY)
@@ -614,15 +776,10 @@ export default function PredictionChart({
       setHoveredAnnotationClusterId(nearestAnnotation?.id ?? null)
     },
     [
-      clampCursorToDataExtent,
-      cursorStepMs,
       data,
-      dataBounds,
-      domainBounds.end,
-      domainBounds.start,
-      emitCursorChange,
+      cursorRangeEnd,
       height,
-      innerWidth,
+      resolveCursorAtProgress,
       resolvedAnnotationClusters,
       resolvedMargin.left,
       resolvedMargin.top,
@@ -633,10 +790,22 @@ export default function PredictionChart({
   )
 
   const handlePointerEnd = useCallback(() => {
+    const fromProgress = resolvedCursor
+      ? Math.max(0, Math.min(1, resolvedCursor.left / cursorRangeEnd))
+      : cursor?.progress
+    if (typeof fromProgress === 'number' && fromProgress < 0.999) {
+      entryAnimationRef.current = {
+        duration: Math.max(400, (1 - fromProgress) * INTERACTION_REVEAL_DURATION),
+        fromProgress,
+        muteUnrevealedSeries: true,
+        startedAt: null,
+        surgeAfterReveal: false,
+      }
+    }
     setCursor(null)
     setHoveredAnnotationClusterId(null)
     emitCursorChange(null)
-  }, [emitCursorChange, setHoveredAnnotationClusterId])
+  }, [cursor?.progress, cursorRangeEnd, emitCursorChange, resolvedCursor, setHoveredAnnotationClusterId])
 
   const shouldRenderLegend = showLegend && Boolean(legendContent)
   const shouldRenderWatermark = Boolean(watermark && (watermark.iconSvg || watermark.iconImageUrl || watermark.label))
@@ -666,12 +835,12 @@ export default function PredictionChart({
         />
 
         <PredictionChartTooltipOverlay
-          tooltipActive={Boolean(cursor)}
-          tooltipData={cursor?.point ?? null}
+          tooltipActive={Boolean(resolvedCursor)}
+          tooltipData={resolvedCursor?.point ?? null}
           positionedTooltipEntries={positionedTooltipEntries}
           margin={resolvedMargin}
           innerWidth={innerWidth}
-          clampedTooltipX={cursor?.left ?? innerWidth}
+          clampedTooltipX={resolvedCursor?.left ?? innerWidth}
           valueFormatter={tooltipValueFormatter}
           dateFormatter={tooltipDateFormatter}
           headerFontSize={tooltipHeaderFontSize}
