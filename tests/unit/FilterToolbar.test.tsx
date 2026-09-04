@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 
 import type { FilterState } from '@/app/[locale]/(platform)/_providers/FilterProvider'
 
@@ -56,5 +56,96 @@ describe('filterToolbar', () => {
     fireEvent.click(hideSportsCheckboxes[0])
 
     expect(onFiltersChange).toHaveBeenCalledWith({ hideSports: true })
+  })
+
+  it('collapses the search input behind an icon button when requested', () => {
+    const onFiltersChange = vi.fn()
+
+    render(<FilterToolbar collapsibleSearch filters={FILTERS} onFiltersChange={onFiltersChange} />)
+
+    expect(screen.queryByTestId('filter-search-input')).not.toBeInTheDocument()
+
+    const searchTrigger = screen.getByRole('button', { name: 'Open search' })
+    expect(searchTrigger).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(searchTrigger)
+
+    expect(screen.getByTestId('filter-search-input')).toBeVisible()
+    expect(screen.queryByTestId('filter-search-trigger')).not.toBeInTheDocument()
+  })
+
+  it('closes the expanded empty search input when clicking outside', () => {
+    const onFiltersChange = vi.fn()
+
+    render(<FilterToolbar collapsibleSearch filters={FILTERS} onFiltersChange={onFiltersChange} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open search' }))
+    expect(screen.getByTestId('filter-search-input')).toBeVisible()
+
+    fireEvent.pointerDown(document.body)
+
+    expect(screen.getByTestId('filter-search-input')).toBeVisible()
+
+    fireEvent.click(document.body)
+
+    expect(screen.queryByTestId('filter-search-input')).not.toBeInTheDocument()
+    expect(screen.getByTestId('filter-search-trigger')).toBeVisible()
+    expect(document.activeElement).toBe(screen.getByTestId('filter-search-trigger'))
+  })
+
+  it('clears a typed query before closing the search with Escape', () => {
+    const onFiltersChange = vi.fn()
+
+    render(<FilterToolbar collapsibleSearch filters={FILTERS} onFiltersChange={onFiltersChange} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open search' }))
+    const searchInput = screen.getByTestId('filter-search-input')
+
+    fireEvent.change(searchInput, { target: { value: 'bitcoin' } })
+    fireEvent.keyDown(searchInput, { key: 'Escape' })
+
+    expect(screen.getByTestId('filter-search-input')).toBeVisible()
+    expect(searchInput).toHaveValue('')
+    expect(onFiltersChange).toHaveBeenCalledWith({ search: '' })
+
+    fireEvent.keyDown(searchInput, { key: 'Escape' })
+
+    expect(screen.queryByTestId('filter-search-input')).not.toBeInTheDocument()
+    expect(document.activeElement).toBe(screen.getByTestId('filter-search-trigger'))
+  })
+
+  it('commits an emptied non-collapsible search when Escape is pressed', () => {
+    const onFiltersChange = vi.fn()
+    const filters = { ...FILTERS, search: 'bitcoin' }
+
+    render(<FilterToolbar filters={filters} onFiltersChange={onFiltersChange} />)
+
+    const searchInput = screen.getByTestId('filter-search-input')
+    fireEvent.change(searchInput, { target: { value: '' } })
+    fireEvent.keyDown(searchInput, { key: 'Escape' })
+
+    expect(searchInput).toHaveValue('')
+    expect(onFiltersChange).toHaveBeenCalledWith({ search: '' })
+  })
+
+  it('does not cancel a non-collapsible search debounce when Escape is pressed with text', async () => {
+    vi.useFakeTimers()
+    const onFiltersChange = vi.fn()
+
+    try {
+      render(<FilterToolbar filters={FILTERS} onFiltersChange={onFiltersChange} />)
+
+      const searchInput = screen.getByTestId('filter-search-input')
+      fireEvent.change(searchInput, { target: { value: 'bitcoin' } })
+      fireEvent.keyDown(searchInput, { key: 'Escape' })
+
+      expect(onFiltersChange).not.toHaveBeenCalled()
+
+      await act(() => vi.advanceTimersByTime(150))
+
+      expect(onFiltersChange).toHaveBeenCalledWith({ search: 'bitcoin' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
